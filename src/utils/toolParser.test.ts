@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseToolCall } from './toolParser';
+import { vi } from 'vitest';
 
 describe('parseToolCall', () => {
   it('should return null if no tool call is present', () => {
@@ -43,8 +44,14 @@ describe('parseToolCall', () => {
   });
 
   it('should return null for malformed JSON arguments', () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
     const text = 'call:calculator({expression:"2+2",})'; // Trailing comma
     expect(parseToolCall(text)).toBeNull();
+
+    consoleErrorSpy.mockRestore();
   });
 
   it('should return null for an incomplete tool call', () => {
