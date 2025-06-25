@@ -15,6 +15,7 @@ export type ToolMeta = {
   name: string;
   description: string;
   schema: ZodSchema<any>;
+  returnDirect?: boolean;
 };
 
 /**

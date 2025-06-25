@@ -1,32 +1,51 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { z } from 'zod';
 import { createAgent, runAgent } from './agent';
-import type { LLM, LLMMessage, Memory, ToolDefinition } from './types';
+import type { LLM, LLMMessage, LLMToolCall, Memory, ToolDefinition } from './types';
 import { tool } from '../tools/tool';
-import { getToolByName, registerTool } from '../tools/toolRegistry';
+import {
+  getToolByName,
+  getToolDefinitions,
+  registerTool,
+} from '../tools/toolRegistry';
 
 // --- Mocks and Stubs ---
 
-vi.mock('../tools/toolRegistry', () => ({
-  registerTool: vi.fn(),
-  getToolByName: vi.fn(),
-}));
+vi.mock('../tools/toolRegistry', async importOriginal => {
+  const original = await importOriginal<typeof import('../tools/toolRegistry')>();
+  return {
+    ...original,
+    registerTool: vi.fn(),
+    getToolByName: vi.fn(),
+    getToolDefinitions: vi.fn(),
+  };
+});
 
 const mockedRegisterTool = vi.mocked(registerTool);
 const mockedGetToolByName = vi.mocked(getToolByName);
+const mockedGetToolDefinitions = vi.mocked(getToolDefinitions);
 
 // A mock LLM that returns canned responses
 class MockLLM implements LLM {
-  private responses: string[];
+  private responses: (string | LLMToolCall)[];
   public history: LLMMessage[][] = [];
+  public toolsSent: ToolDefinition[][] = [];
 
-  constructor(responses: string[]) {
+  constructor(responses: (string | LLMToolCall)[]) {
     this.responses = responses;
   }
 
-  async generate(messages: LLMMessage[]): Promise<string> {
+  async generate(
+    messages: LLMMessage[],
+    tools?: ToolDefinition[],
+  ): Promise<string | LLMToolCall> {
     this.history.push([...messages]); // Store a snapshot of the messages
-    return this.responses.shift() || 'No more responses.';
+    this.toolsSent.push(tools || []);
+    const response = this.responses.shift();
+    if (!response) {
+      throw new Error('MockLLM ran out of responses.');
+    }
+    return response;
   }
 }
 
@@ -47,31 +66,50 @@ const calculatorSchema = z.object({
   expression: z.string(),
 });
 
+const directToolSchema = z.object({
+  data: z.string(),
+});
+
 describe('Agent Core', () => {
-  let toolRegistry: Map<string, ToolDefinition>;
+  let toolDefinitions: ToolDefinition[];
 
   beforeEach(() => {
-    toolRegistry = new Map<string, ToolDefinition>();
+    // Reset mocks and registry before each test
     vi.clearAllMocks();
+    const toolRegistry = new Map<string, ToolDefinition>();
 
     mockedRegisterTool.mockImplementation((def: ToolDefinition) => {
       toolRegistry.set(def.name, def);
     });
+
     mockedGetToolByName.mockImplementation((name: string) => {
       return toolRegistry.get(name);
     });
 
-    // Register the calculator tool for each test
+    mockedGetToolDefinitions.mockImplementation((names: string[]) => {
+      return names
+        .map(name => toolRegistry.get(name))
+        .filter((tool): tool is ToolDefinition => !!tool);
+    });
+
+    // Clear and register tools for each test
     tool({
       name: 'calculator',
       description: 'Calculates a math expression.',
       schema: calculatorSchema,
-    })(async ({ expression }: { expression: string }) => {
-      return eval(expression).toString();
-    });
+    })(async ({ expression }: { expression: string }) => eval(expression));
+
+    tool({
+      name: 'directTool',
+      description: 'Returns data directly.',
+      schema: directToolSchema,
+      returnDirect: true,
+    })(async ({ data }: { data: string }) => ({ result: data }));
+
+    toolDefinitions = mockedGetToolDefinitions(['calculator', 'directTool']);
   });
 
-  it('should run a simple query without tools or memory', async () => {
+  it('should run a simple query without tools and return a string response', async () => {
     const llm = new MockLLM(['The answer is 4.']);
     const agent = createAgent({ llm });
 
@@ -83,6 +121,8 @@ describe('Agent Core', () => {
       role: 'user',
       content: 'What is 2 + 2?',
     });
+    // Ensure no tools were passed to the LLM
+    expect(llm.toolsSent[0]).toEqual([]);
   });
 
   it('should use memory to load and save conversation history', async () => {
@@ -104,30 +144,53 @@ describe('Agent Core', () => {
     });
   });
 
-  it('should execute a tool call and return the result', async () => {
-    const llm = new MockLLM([
-      'call:calculator({"expression":"2*3"})',
-      'The result is 6.',
-    ]);
+  it('should call a tool, loop the result back to the LLM, and return the final summary', async () => {
+    const toolCall: LLMToolCall = {
+      name: 'calculator',
+      args: { expression: '2 * 3' },
+    };
+    const llm = new MockLLM([toolCall, 'The result is 6.']);
     const agent = createAgent({ llm, tools: ['calculator'] });
 
     const result = await runAgent(agent, 'What is two times three?');
 
     expect(result).toBe('The result is 6.');
     expect(llm.history).toHaveLength(2);
+    expect(llm.toolsSent[0]).toEqual(
+      mockedGetToolDefinitions(['calculator']),
+    );
 
-    // Check that the tool result was passed back to the LLM
     const finalLLMCallMessages = llm.history[1];
     expect(finalLLMCallMessages.slice(-1)[0]).toEqual({
       role: 'tool',
-      content: '"6"',
+      content: '6', // eval returns a number, which gets stringified
     });
   });
 
+  it('should call a tool with returnDirect and return its result immediately', async () => {
+    const toolCall: LLMToolCall = {
+      name: 'directTool',
+      args: { data: 'important_data' },
+    };
+    const llm = new MockLLM([toolCall]); // LLM is only called once
+    const agent = createAgent({ llm, tools: ['directTool'] });
+
+    const result = await runAgent(agent, 'Get the important data.');
+
+    // The result should be the direct, stringified output of the tool
+    expect(result).toBe(JSON.stringify({ result: 'important_data' }));
+    // LLM should have only been called once
+    expect(llm.history).toHaveLength(1);
+  });
+
   it('should handle tool not found gracefully', async () => {
+    const toolCall: LLMToolCall = {
+      name: 'nonExistentTool',
+      args: { arg: 'value' },
+    };
     const llm = new MockLLM([
-      'call:nonExistentTool({"arg":"value"})',
-      "I am sorry, I cannot find that tool.",
+      toolCall,
+      'I am sorry, I cannot find that tool.',
     ]);
     const agent = createAgent({ llm, tools: ['calculator'] });
 

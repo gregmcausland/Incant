@@ -10,6 +10,12 @@ export function getToolByName(name: string): ToolDefinition | undefined {
   return tools.get(name);
 }
 
+export function getToolDefinitions(names: string[]): ToolDefinition[] {
+  return names
+    .map(name => getToolByName(name))
+    .filter((tool): tool is ToolDefinition => tool !== undefined);
+}
+
 export function getToolMap(
   toolIds: string[],
 ): Record<string, ToolDefinition> {

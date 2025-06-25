@@ -1,12 +1,25 @@
 import type { ZodSchema } from 'zod';
 
+export type LLMToolCall = {
+  name: string;
+  args: any;
+};
+
 export type LLMMessage = {
   role: 'user' | 'model' | 'tool';
-  content: string;
+  content?: string;
+  toolCall?: LLMToolCall;
+  toolResult?: {
+    call: LLMToolCall;
+    output: any;
+  }
 };
 
 export interface LLM {
-  generate(messages: LLMMessage[]): Promise<string>;
+  generate(
+    messages: LLMMessage[],
+    tools?: ToolDefinition[]
+  ): Promise<string | LLMToolCall>;
 }
 
 export type MemoryEntry = {
@@ -26,6 +39,7 @@ export type ToolDefinition = {
   description: string;
   schema: ZodSchema<any>;
   handler: ToolHandler;
+  returnDirect?: boolean;
 };
 
 export type AgentConfig = {

@@ -1,9 +1,10 @@
 {
   "name": "incant",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "vitest run --reporter verbose"
+    "test": "vitest",
+    "start": "ts-node example.ts"
   },
   "repository": {
     "type": "git",
@@ -23,6 +24,9 @@
     "zod-to-json-schema": "^3.24.5"
   },
   "devDependencies": {
+    "@types/node": "^24.0.4",
+    "dotenv": "^16.5.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

@@ -2,11 +2,11 @@ import {
   AgentConfig,
   AgentState,
   LLMMessage,
+  LLMToolCall,
   Memory,
   // ToolDefinition, // No longer used directly
 } from './types';
-import { getToolByName } from '../tools/toolRegistry';
-import { parseToolCall } from '../utils/toolParser';
+import { getToolByName, getToolDefinitions } from '../tools/toolRegistry';
 
 export function createAgent(config: AgentConfig): AgentState {
   return { config };
@@ -16,7 +16,7 @@ export async function runAgent(
   agent: AgentState,
   input: string,
 ): Promise<string> {
-  const { llm, memory } = agent.config;
+  const { llm, memory, tools: toolNames } = agent.config;
 
   const messages: LLMMessage[] = [];
 
@@ -27,44 +27,49 @@ export async function runAgent(
 
   messages.push({ role: 'user', content: input });
 
+  const availableTools = toolNames ? getToolDefinitions(toolNames) : [];
+
   // Let's create a loop to handle potential tool calls
-  let done = false;
-  let response = '';
+  let finalResponse = '';
 
-  while (!done) {
-    const rawResponse = await llm.generate(messages);
-    const toolCall = parseToolCall(rawResponse);
+  while (!finalResponse) {
+    const response = await llm.generate(messages, availableTools);
 
-    if (toolCall) {
-      messages.push({ role: 'model', content: rawResponse });
+    if (typeof response === 'string') {
+      finalResponse = response;
+      if (memory) {
+        await memory.save({ input, output: finalResponse });
+      }
+    } else {
+      // It's an LLMToolCall
+      const toolCall = response as LLMToolCall;
+      messages.push({ role: 'model', toolCall }); // Use the new structured format
       const tool = getToolByName(toolCall.name);
 
       if (tool) {
-        // Here we would validate args against tool.schema, but for now, we just execute
         const toolResult = await tool.handler(toolCall.args);
-        messages.push({ role: 'tool', content: JSON.stringify(toolResult) });
-      } else {
-        // Handle tool not found
+        
+        if (tool.returnDirect) {
+          return JSON.stringify(toolResult);
+        }
+
+        // Use the new structured format for the result
         messages.push({
           role: 'tool',
-          content: `Error: Tool '${toolCall.name}' not found.`,
+          toolResult: { call: toolCall, output: toolResult },
         });
-      }
-    } else {
-      response = rawResponse;
-      done = true;
-      // Save to memory only when we have a final response
-      if (memory) {
-        await memory.save({ input, output: response });
+      } else {
+        // Handle tool not found, still using the structured format
+        messages.push({
+          role: 'tool',
+          toolResult: {
+            call: toolCall,
+            output: `Error: Tool '${toolCall.name}' not found.`,
+          },
+        });
       }
     }
   }
 
-  /*
-  if (memory) {
-    await memory.save({ input, output: response });
-  }
-  */
-
-  return response;
+  return finalResponse;
 } 
